@@ -1,0 +1,5 @@
+python-dotenv
+praw
+openai
+pandas
+requests
