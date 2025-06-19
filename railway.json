@@ -1,0 +1,29 @@
+{
+  "environments": {
+    "production": {
+      "services": {
+        "vulture-host": {
+          "type": "repository",
+          "repo": "boots0/vulture-host",
+          "branch": "main",
+          "rootDir": ".",
+          "startCommand": "python -m scripts.run_scan"
+        },
+        "community-scan": {
+          "type": "function",
+          "runtime": "python:3.11",
+          "entrypoint": "scripts/run_scan.py",
+          "command": "python -m scripts.run_scan",
+          "schedule": "0 8,12,16 * * *"
+        },
+        "user-analysis": {
+          "type": "function",
+          "runtime": "python:3.11",
+          "entrypoint": "scripts/run_user_analysis.py",
+          "command": "python -m scripts.run_user_analysis",
+          "schedule": "0 9,13,17 * * *"
+        }
+      }
+    }
+  }
+}
