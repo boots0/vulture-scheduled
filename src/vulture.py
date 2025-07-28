@@ -91,6 +91,23 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 # ---------------------------
+# **NEW**: Memory/Cache Functions (Re-added)
+# ---------------------------
+
+def load_processed_ids():
+    """Loads the set of already processed Reddit post IDs from a file."""
+    if not os.path.exists(PROCESSED_POSTS_FILE):
+        return set()
+    with open(PROCESSED_POSTS_FILE, 'r') as f:
+        return {line.strip() for line in f}
+
+def save_processed_ids(ids_to_save):
+    """Appends a list of new post IDs to the processed IDs file."""
+    with open(PROCESSED_POSTS_FILE, 'a') as f:
+        for post_id in ids_to_save:
+            f.write(f"{post_id}\n")
+
+# ---------------------------
 # Core Vulture Logic
 # ---------------------------
 
@@ -176,19 +193,17 @@ def append_plays_to_sheet(plays_data, sheet_name, training_mode=False):
         rows_to_append = []
         for play in plays_data:
             if training_mode:
-                # Format for Agent Training Data sheet
                 rows_to_append.append([
                     play.get('id'), play.get('title'), play.get('selftext'),
                     play.get('ticker'), play.get('briefing'), play.get('the_play'),
                     play.get('confidence_score'), datetime.now(timezone.utc).isoformat()
                 ])
             else:
-                # Format for main Vulture Data sheet
                 rows_to_append.append([
                     play.get('id'), play.get('ticker'), play.get('briefing'),
                     play.get('the_play'), play.get('confidence_score'),
                     play.get('url'), play.get('subreddit'), play.get('created_utc'),
-                    datetime.now(timezone.utc).isoformat(), "Pending Review" # Status
+                    datetime.now(timezone.utc).isoformat(), "Pending Review"
                 ])
         
         worksheet.append_rows(rows_to_append)
@@ -311,15 +326,11 @@ def run_confirmation_scan():
         confirmed_plays_for_discord = []
         for post in pending_posts:
             comments = get_comments_for_post(post['id'])
-            # We need the original title and selftext for a good re-analysis.
-            # This is a limitation; for now, we pass placeholder data.
-            # A better implementation might store selftext in the sheet or re-fetch it.
             original_post_data = {'title': post.get('title', 'Title not available'), 'selftext': 'Body not available'}
             analysis = get_ai_synthesis(original_post_data, comments)
             if analysis:
                 analysis['id'] = post['id']
                 updated_plays.append(analysis)
-                # Combine with original data for Discord post
                 confirmed_play = {**post, **analysis}
                 confirmed_plays_for_discord.append(confirmed_play)
         
