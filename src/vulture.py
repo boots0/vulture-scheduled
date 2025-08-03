@@ -222,7 +222,6 @@ def analyze_discussion_comments(post):
     user_prompt = f"Here are the top comments:\n\n{comments_text}"
     try:
         response = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], temperature=0.7)
-        # **FIX**: Return both summary and raw comments for saving
         return response.choices[0].message.content.strip(), comments
     except Exception as e:
         print(f"An error occurred during comment analysis: {e}"); return None, []
@@ -271,7 +270,6 @@ def run_reddit_scan():
         
         post_plays_to_discord(final_plays)
         
-        # **FIX**: Re-added logic to save individual plays to Google Sheets
         rows_to_save = []
         for play in final_plays:
             rows_to_save.append([
@@ -290,7 +288,6 @@ def run_reddit_scan():
             sentiment_summary, raw_comments = analyze_discussion_comments(daily_thread)
             if sentiment_summary:
                 post_daily_summary(sentiment_summary)
-                # **FIX**: Re-added logic to save daily sentiment for Smith
                 training_rows = [[
                     daily_thread.id, daily_thread.title, "\n".join(raw_comments),
                     sentiment_summary, datetime.now(timezone.utc).isoformat()
