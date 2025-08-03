@@ -90,16 +90,18 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     return gspread.authorize(creds)
 
-def append_to_sheet(sheet_name, rows_to_append, clear_sheet=False, header=None):
-    """A robust function to append data to a specified Google Sheet."""
+# **REFACTORED**: Centralized function for all sheet writing operations.
+def write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet=False, header=None):
+    """A robust function to write data to a specific worksheet (tab) within a spreadsheet."""
     if not rows_to_append:
-        print(f"No data to append to sheet '{sheet_name}'.")
+        print(f"No data to write to sheet '{spreadsheet_name} -> {worksheet_name}'.")
         return
     
-    print(f"Attempting to write {len(rows_to_append)} rows to Google Sheet: {sheet_name}...")
+    print(f"Attempting to write {len(rows_to_append)} rows to Google Sheet: {spreadsheet_name} -> {worksheet_name}...")
     try:
         gc = get_gspread_client()
-        worksheet = gc.open(sheet_name).sheet1
+        spreadsheet = gc.open(spreadsheet_name)
+        worksheet = spreadsheet.worksheet(worksheet_name)
         
         if clear_sheet:
             worksheet.clear()
@@ -107,9 +109,11 @@ def append_to_sheet(sheet_name, rows_to_append, clear_sheet=False, header=None):
                 worksheet.append_row(header)
         
         worksheet.append_rows(rows_to_append)
-        print(f"Successfully wrote data to '{sheet_name}'.")
+        print(f"Successfully wrote data to '{spreadsheet_name} -> {worksheet_name}'.")
     except gspread.exceptions.SpreadsheetNotFound:
-        print(f"ERROR: Spreadsheet '{sheet_name}' not found. Please check the name and sharing permissions.")
+        print(f"ERROR: Spreadsheet '{spreadsheet_name}' not found. Please check the name and sharing permissions.")
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"ERROR: Worksheet (tab) '{worksheet_name}' not found in the spreadsheet '{spreadsheet_name}'.")
     except gspread.exceptions.APIError as e:
         print(f"ERROR: An API error occurred with Google Sheets: {e}")
     except Exception as e:
@@ -290,7 +294,10 @@ def run_news_scan():
                 article.get('summary'), article.get('source'), article.get('url')
             ])
         
-        append_to_sheet(os.getenv("GOOGLE_NEWS_SHEET_NAME"), rows_to_append)
+        # **FIX**: Use the correct spreadsheet and worksheet names
+        spreadsheet_name = os.getenv("GOOGLE_SHEET_NAME")
+        worksheet_name = os.getenv("GOOGLE_NEWS_SHEET_NAME")
+        write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append)
 
     except finnhub.FinnhubAPIException as e:
         print(f"Finnhub API error during news scan: {e}")
@@ -329,7 +336,10 @@ def run_calendar_scan():
             ])
             
         header = ["Time", "Country", "Event", "Impact", "Estimate", "Actual", "Previous"]
-        append_to_sheet(os.getenv("GOOGLE_CALENDAR_SHEET_NAME"), rows_to_append, clear_sheet=True, header=header)
+        # **FIX**: Use the correct spreadsheet and worksheet names
+        spreadsheet_name = os.getenv("GOOGLE_SHEET_NAME")
+        worksheet_name = os.getenv("GOOGLE_CALENDAR_SHEET_NAME")
+        write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet=True, header=header)
 
     except finnhub.FinnhubAPIException as e:
         print(f"Finnhub API error during calendar scan: {e}")
