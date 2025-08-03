@@ -7,6 +7,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+import io
 
 import pandas as pd
 import praw
@@ -16,7 +17,7 @@ from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 import finnhub
-import econdb
+from alpha_vantage.fundamentaldata import FundamentalData
 
 # ---------------------------
 # Setup and Configuration
@@ -32,7 +33,8 @@ def check_environment_variables():
         "DISCORD_WEBHOOK_FORUM", "DISCORD_WEBHOOK_NEWS", "DISCORD_TAG_ID_LOW",
         "DISCORD_TAG_ID_MEDIUM", "DISCORD_TAG_ID_HIGH",
         "GOOGLE_CREDENTIALS_JSON", "GOOGLE_SHEET_NAME", "GOOGLE_TRAINING_SHEET_NAME",
-        "GOOGLE_NEWS_SHEET_NAME", "GOOGLE_CALENDAR_SHEET_NAME", "FINNHUB_API_KEY"
+        "GOOGLE_NEWS_SHEET_NAME", "GOOGLE_CALENDAR_SHEET_NAME", "FINNHUB_API_KEY",
+        "ALPHA_VANTAGE_API_KEY"
     ]
     missing_vars = []
     print("--- Checking Environment Variables ---")
@@ -60,6 +62,8 @@ reddit = praw.Reddit(
 )
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 finnhub_client = finnhub.Client(api_key=os.getenv("FINNHUB_API_KEY"))
+# **FIX**: Use the correct client for fundamental data
+alpha_vantage_client = FundamentalData(key=os.getenv("ALPHA_VANTAGE_API_KEY"))
 
 
 # --- Discord Configuration ---
@@ -334,41 +338,94 @@ def run_news_scan():
 # ---------------------------
 # Economic Calendar Logic
 # ---------------------------
-def run_calendar_scan():
-    """Fetches the economic calendar for the next 7 days and updates a Google Sheet."""
-    print("--- Vulture Economic Calendar Scan triggered ---")
+def post_weekly_earnings_summary(earnings_data):
+    """Formats and posts the weekly earnings summary to Discord."""
+    if not earnings_data:
+        print("No earnings data to post.")
+        return
+
+    news_webhook_url = WEBHOOKS.get("news")
+    if not news_webhook_url:
+        print("Warning: News webhook not set. Skipping earnings post.")
+        return
+
+    # Group earnings by day
+    earnings_by_day = {}
+    for item in earnings_data:
+        report_date = item.get('reportDate', 'Unknown Date')
+        day_name = datetime.strptime(report_date, '%Y-%m-%d').strftime('%A, %B %d')
+        if day_name not in earnings_by_day:
+            earnings_by_day[day_name] = []
+        earnings_by_day[day_name].append(item)
+
+    # Build the description string
+    description = ""
+    for day, earnings in sorted(earnings_by_day.items()):
+        description += f"**{day}**\n"
+        for item in earnings[:5]: # Limit to 5 per day to keep it clean
+            description += f"- **{item.get('symbol')}** ({item.get('hour', 'N/A').upper()})\n"
+        if len(earnings) > 5:
+            description += "- ...and more\n"
+        description += "\n"
+
+    embed = {
+        "title": "📅 Weekly Earnings Outlook",
+        "description": description.strip(),
+        "color": 0x4A90E2,
+        "footer": {"text": "Data from Alpha Vantage"},
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
     try:
-        print("Fetching economic calendar from Econdb...")
-        df = econdb.live.get_calendar(limit=100)
+        requests.post(news_webhook_url, json={"embeds": [embed]}, timeout=10).raise_for_status()
+        print("Successfully posted weekly earnings summary to Discord.")
+    except Exception as e:
+        print(f"An error occurred posting the earnings summary: {e}")
+
+
+def run_calendar_scan():
+    """Fetches economic and earnings calendars and updates Google Sheets/Discord."""
+    print("--- Vulture Calendar Scan triggered ---")
+    
+    # **NEW**: Check if today is Monday (0 = Monday)
+    is_monday = (datetime.now(timezone.utc).weekday() == 0)
+
+    # --- Weekly Earnings Calendar (Runs only on Mondays) ---
+    if is_monday:
+        try:
+            print("Fetching weekly earnings calendar from Alpha Vantage...")
+            # The API returns data as a CSV string for the next 7 days
+            data, _ = alpha_vantage_client.get_earnings_calendar(horizon='7day')
+            df_earnings = pd.read_csv(io.StringIO(data))
+
+            if not df_earnings.empty:
+                print(f"Fetched {len(df_earnings)} upcoming earnings reports.")
+                post_weekly_earnings_summary(df_earnings.to_dict(orient='records'))
+            else:
+                print("No upcoming earnings found for the next 7 days.")
+        except Exception as e:
+            print(f"An unexpected error occurred during the earnings calendar scan: {e}")
+            traceback.print_exc()
+
+    # --- General Economic Calendar (Always runs) ---
+    try:
+        print("Fetching general economic calendar from Alpha Vantage...")
+        data, _ = alpha_vantage_client.get_economic_calendar()
+        df_econ = pd.read_csv(io.StringIO(data))
+
+        if df_econ.empty:
+            print("No economic events found from Alpha Vantage."); return
+
+        print(f"Fetched {len(df_econ)} economic events.")
         
-        if df.empty:
-            print("No economic events found for the upcoming week."); return
-
-        print(f"Fetched {len(df)} economic events.")
-
-        today = pd.to_datetime(datetime.now(timezone.utc).date())
-        one_week_from_now = today + pd.Timedelta(days=7)
-        df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
-        df_filtered = df[(df['datetime'] >= today) & (df['datetime'] <= one_week_from_now)]
-        
-        if df_filtered.empty:
-            print("No events found within the next 7 days."); return
-
-        rows_to_append = []
-        for _, event in df_filtered.iterrows():
-            rows_to_append.append([
-                event.get('datetime').isoformat(), event.get('country'), event.get('event'),
-                event.get('importance'), event.get('forecast'), event.get('actual'),
-                event.get('previous')
-            ])
-            
-        header = ["DateTime", "Country", "Event", "Impact", "Forecast", "Actual", "Previous"]
+        rows_to_append = df_econ.values.tolist()
+        header = df_econ.columns.tolist()
         spreadsheet_name = os.getenv("GOOGLE_SHEET_NAME")
         worksheet_name = os.getenv("GOOGLE_CALENDAR_SHEET_NAME")
         write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet=True, header=header)
 
     except Exception as e:
-        print(f"An unexpected error occurred during the calendar scan: {e}")
+        print(f"An unexpected error occurred during the economic calendar scan: {e}")
         traceback.print_exc()
 
 
