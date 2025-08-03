@@ -62,7 +62,6 @@ reddit = praw.Reddit(
 )
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 finnhub_client = finnhub.Client(api_key=os.getenv("FINNHUB_API_KEY"))
-# **FIX**: Use the correct client for fundamental data
 alpha_vantage_client = FundamentalData(key=os.getenv("ALPHA_VANTAGE_API_KEY"))
 
 
@@ -175,7 +174,24 @@ def scrape_new_posts(subreddits, processed_ids):
 def get_ai_synthesis(post_data, comments_text):
     print(f"Sending post '{post_data['title']}' for AI synthesis...")
     system_prompt = """
-    You are an expert retail investor... Your primary goal is to synthesize the original post with the community's reaction...
+    You are an expert retail investor, skilled at replicating the intuitive process of a human analyst to find actionable trading ideas on Reddit.
+    Your primary goal is to synthesize the original post with the community's reaction in the comments to form a holistic view.
+
+    **Analysis Steps & Output Fields:**
+    You will be given the original post and a sample of its top comments. Based on BOTH, generate:
+    1.  `ticker`: The SINGLE stock ticker discussed. If multiple or none, return "N/A".
+    2.  `briefing`: A synthesis of the post and comments. What is the core thesis? How did the community react? Are there strong counterarguments or validations?
+    3.  `the_play`: The community-vetted actionable takeaway. What is the real play after considering the comments? If none, state "No clear play identified."
+    4.  `confidence_score`: A score from 0.0 to 10.0. This score MUST reflect the combined quality of the original thesis AND the community's reception. A great idea torn apart by comments should receive a LOW score.
+
+    **Core Rules for Scoring:**
+    - If `ticker` is "N/A", the `confidence_score` MUST be 0.0.
+    - **High Confidence (8.0-10.0):** A clear, well-reasoned thesis with strong, positive validation in the comments.
+    - **Medium Confidence (4.0-7.9):** A decent thesis with mixed or moderate community feedback.
+    - **Low Confidence (0.1-3.9):** A speculative idea, or a good idea that was heavily criticized in the comments.
+    - **Zero Confidence (0.0):** No actionable play, a question, or a post that was thoroughly debunked by the community.
+
+    Your entire response must be a single, valid JSON object. Do not include any other text, explanations, or markdown.
     """
     user_prompt = f"**Original Post Title:** {post_data['title']}\n\n**Original Post Body:**\n{post_data['selftext']}\n\n**Top Comments:**\n{comments_text}"
     try:
@@ -349,7 +365,6 @@ def post_weekly_earnings_summary(earnings_data):
         print("Warning: News webhook not set. Skipping earnings post.")
         return
 
-    # Group earnings by day
     earnings_by_day = {}
     for item in earnings_data:
         report_date = item.get('reportDate', 'Unknown Date')
@@ -358,11 +373,10 @@ def post_weekly_earnings_summary(earnings_data):
             earnings_by_day[day_name] = []
         earnings_by_day[day_name].append(item)
 
-    # Build the description string
     description = ""
     for day, earnings in sorted(earnings_by_day.items()):
         description += f"**{day}**\n"
-        for item in earnings[:5]: # Limit to 5 per day to keep it clean
+        for item in earnings[:5]:
             description += f"- **{item.get('symbol')}** ({item.get('hour', 'N/A').upper()})\n"
         if len(earnings) > 5:
             description += "- ...and more\n"
@@ -387,14 +401,11 @@ def run_calendar_scan():
     """Fetches economic and earnings calendars and updates Google Sheets/Discord."""
     print("--- Vulture Calendar Scan triggered ---")
     
-    # **NEW**: Check if today is Monday (0 = Monday)
     is_monday = (datetime.now(timezone.utc).weekday() == 0)
 
-    # --- Weekly Earnings Calendar (Runs only on Mondays) ---
     if is_monday:
         try:
             print("Fetching weekly earnings calendar from Alpha Vantage...")
-            # The API returns data as a CSV string for the next 7 days
             data, _ = alpha_vantage_client.get_earnings_calendar(horizon='7day')
             df_earnings = pd.read_csv(io.StringIO(data))
 
@@ -407,23 +418,45 @@ def run_calendar_scan():
             print(f"An unexpected error occurred during the earnings calendar scan: {e}")
             traceback.print_exc()
 
-    # --- General Economic Calendar (Always runs) ---
+    # **FIX**: Replaced the non-functional economic calendar with a direct API call.
     try:
         print("Fetching general economic calendar from Alpha Vantage...")
-        data, _ = alpha_vantage_client.get_economic_calendar()
-        df_econ = pd.read_csv(io.StringIO(data))
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        # Alpha Vantage provides this data as a direct CSV download
+        url = f'https://www.alphavantage.co/query?function=ECONOMIC_CALENDAR&horizon=3month&apikey={api_key}'
+        r = requests.get(url)
+        r.raise_for_status()
+        
+        df_econ = pd.read_csv(io.StringIO(r.text))
 
         if df_econ.empty:
             print("No economic events found from Alpha Vantage."); return
 
         print(f"Fetched {len(df_econ)} economic events.")
         
-        rows_to_append = df_econ.values.tolist()
-        header = df_econ.columns.tolist()
+        # Filter for the next 7 days
+        df_econ['releaseTime'] = pd.to_datetime(df_econ['releaseTime'])
+        today = datetime.now(timezone.utc)
+        one_week_from_now = today + timedelta(days=7)
+        df_filtered = df_econ[
+            (df_econ['releaseTime'] >= today) & 
+            (df_econ['releaseTime'] <= one_week_from_now)
+        ].copy()
+
+        if df_filtered.empty:
+            print("No events found for the upcoming week after filtering.")
+            return
+
+        # Prepare data for Google Sheets
+        df_filtered['releaseTime'] = df_filtered['releaseTime'].astype(str)
+        rows_to_append = df_filtered.values.tolist()
+        header = df_filtered.columns.tolist()
         spreadsheet_name = os.getenv("GOOGLE_SHEET_NAME")
         worksheet_name = os.getenv("GOOGLE_CALENDAR_SHEET_NAME")
         write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet=True, header=header)
 
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch economic calendar from Alpha Vantage API: {e}")
     except Exception as e:
         print(f"An unexpected error occurred during the economic calendar scan: {e}")
         traceback.print_exc()
