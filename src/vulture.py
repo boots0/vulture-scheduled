@@ -4,6 +4,7 @@ import json
 import re
 import argparse
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,7 @@ from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 import finnhub
+import econdb
 
 # ---------------------------
 # Setup and Configuration
@@ -90,7 +92,6 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     return gspread.authorize(creds)
 
-# **REFACTORED**: Centralized function for all sheet writing operations.
 def write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet=False, header=None):
     """A robust function to write data to a specific worksheet (tab) within a spreadsheet."""
     if not rows_to_append:
@@ -118,6 +119,7 @@ def write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet
         print(f"ERROR: An API error occurred with Google Sheets: {e}")
     except Exception as e:
         print(f"An unexpected error occurred while writing to Google Sheets: {e}")
+        traceback.print_exc()
 
 
 # ---------------------------
@@ -220,9 +222,10 @@ def analyze_discussion_comments(post):
     user_prompt = f"Here are the top comments:\n\n{comments_text}"
     try:
         response = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], temperature=0.7)
-        return response.choices[0].message.content.strip()
+        # **FIX**: Return both summary and raw comments for saving
+        return response.choices[0].message.content.strip(), comments
     except Exception as e:
-        print(f"An error occurred during comment analysis: {e}"); return None
+        print(f"An error occurred during comment analysis: {e}"); return None, []
 
 def post_daily_summary(sentiment_summary):
     if not sentiment_summary: return
@@ -248,6 +251,7 @@ def run_reddit_scan():
     processed_ids = load_processed_ids()
     new_posts = scrape_new_posts(TARGET_SUBREDDITS, processed_ids)
     if not new_posts: print("Scan finished: No new posts to process."); return
+    
     analyzed_plays, newly_processed_ids = [], []
     for post in new_posts:
         comments = get_comments_for_post(post['id'])
@@ -257,17 +261,41 @@ def run_reddit_scan():
             if float(full_play_data.get('confidence_score', 0)) > 0 and full_play_data.get('ticker', 'N/A').upper() not in ['N/A', 'MULTI_STOCK']:
                 analyzed_plays.append(full_play_data)
         newly_processed_ids.append(post['id'])
-    if not analyzed_plays: print("No actionable plays found after analysis."); return
-    df = pd.DataFrame(analyzed_plays)
-    df.sort_values(by=['score', 'num_comments'], ascending=False, inplace=True)
-    final_plays = df.drop_duplicates(subset=['title'], keep='first').to_dict(orient='records')
-    post_plays_to_discord(final_plays)
+    
+    if not analyzed_plays: 
+        print("No actionable plays found after analysis."); 
+    else:
+        df = pd.DataFrame(analyzed_plays)
+        df.sort_values(by=['score', 'num_comments'], ascending=False, inplace=True)
+        final_plays = df.drop_duplicates(subset=['title'], keep='first').to_dict(orient='records')
+        
+        post_plays_to_discord(final_plays)
+        
+        # **FIX**: Re-added logic to save individual plays to Google Sheets
+        rows_to_save = []
+        for play in final_plays:
+            rows_to_save.append([
+                play.get('id'), play.get('ticker'), play.get('briefing'),
+                play.get('the_play'), play.get('confidence_score'),
+                play.get('url'), play.get('subreddit'), play.get('created_utc'),
+                datetime.now(timezone.utc).isoformat()
+            ])
+        write_to_sheet(os.getenv("GOOGLE_SHEET_NAME"), "Vulture Data", rows_to_save)
+
     save_processed_ids(newly_processed_ids)
+    
     if is_first_run_of_day:
         daily_thread = find_daily_discussion_thread()
         if daily_thread:
-            sentiment_summary = analyze_discussion_comments(daily_thread)
-            post_daily_summary(sentiment_summary)
+            sentiment_summary, raw_comments = analyze_discussion_comments(daily_thread)
+            if sentiment_summary:
+                post_daily_summary(sentiment_summary)
+                # **FIX**: Re-added logic to save daily sentiment for Smith
+                training_rows = [[
+                    daily_thread.id, daily_thread.title, "\n".join(raw_comments),
+                    sentiment_summary, datetime.now(timezone.utc).isoformat()
+                ]]
+                write_to_sheet(os.getenv("GOOGLE_SHEET_NAME"), os.getenv("GOOGLE_TRAINING_SHEET_NAME"), training_rows)
         with open(last_run_date_file, 'w') as f: f.write(today_str)
         print("First run of the day complete.")
     print("--- Vulture Reddit Scan Complete ---")
@@ -294,15 +322,16 @@ def run_news_scan():
                 article.get('summary'), article.get('source'), article.get('url')
             ])
         
-        # **FIX**: Use the correct spreadsheet and worksheet names
         spreadsheet_name = os.getenv("GOOGLE_SHEET_NAME")
         worksheet_name = os.getenv("GOOGLE_NEWS_SHEET_NAME")
         write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append)
 
     except finnhub.FinnhubAPIException as e:
         print(f"Finnhub API error during news scan: {e}")
+        traceback.print_exc()
     except Exception as e:
         print(f"An unexpected error occurred during the news scan: {e}")
+        traceback.print_exc()
 
 
 # ---------------------------
@@ -312,39 +341,38 @@ def run_calendar_scan():
     """Fetches the economic calendar for the next 7 days and updates a Google Sheet."""
     print("--- Vulture Economic Calendar Scan triggered ---")
     try:
-        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        one_week_from_now = (datetime.now(timezone.utc) + timedelta(days=7)).strftime('%Y-%m-%d')
+        print("Fetching economic calendar from Econdb...")
+        df = econdb.live.get_calendar(limit=100)
         
-        print("Fetching economic calendar from Finnhub...")
-        calendar_data = finnhub_client.economic_calendar(_from=today, to=one_week_from_now)
-        
-        if not calendar_data or 'economicCalendar' not in calendar_data:
-             print("No economic calendar data found or unexpected format from API."); return
-        
-        events = calendar_data.get('economicCalendar', [])
-        
-        if not events:
+        if df.empty:
             print("No economic events found for the upcoming week."); return
-        print(f"Fetched {len(events)} economic events for the next 7 days.")
+
+        print(f"Fetched {len(df)} economic events.")
+
+        today = pd.to_datetime(datetime.now(timezone.utc).date())
+        one_week_from_now = today + pd.Timedelta(days=7)
+        df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
+        df_filtered = df[(df['datetime'] >= today) & (df['datetime'] <= one_week_from_now)]
+        
+        if df_filtered.empty:
+            print("No events found within the next 7 days."); return
 
         rows_to_append = []
-        for event in events:
+        for _, event in df_filtered.iterrows():
             rows_to_append.append([
-                event.get('time'), event.get('country'), event.get('event'),
-                event.get('impact'), event.get('estimate'), event.get('actual'),
-                event.get('prev')
+                event.get('datetime').isoformat(), event.get('country'), event.get('event'),
+                event.get('importance'), event.get('forecast'), event.get('actual'),
+                event.get('previous')
             ])
             
-        header = ["Time", "Country", "Event", "Impact", "Estimate", "Actual", "Previous"]
-        # **FIX**: Use the correct spreadsheet and worksheet names
+        header = ["DateTime", "Country", "Event", "Impact", "Forecast", "Actual", "Previous"]
         spreadsheet_name = os.getenv("GOOGLE_SHEET_NAME")
         worksheet_name = os.getenv("GOOGLE_CALENDAR_SHEET_NAME")
         write_to_sheet(spreadsheet_name, worksheet_name, rows_to_append, clear_sheet=True, header=header)
 
-    except finnhub.FinnhubAPIException as e:
-        print(f"Finnhub API error during calendar scan: {e}")
     except Exception as e:
         print(f"An unexpected error occurred during the calendar scan: {e}")
+        traceback.print_exc()
 
 
 # ---------------------------
