@@ -90,6 +90,32 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     return gspread.authorize(creds)
 
+def append_to_sheet(sheet_name, rows_to_append, clear_sheet=False, header=None):
+    """A robust function to append data to a specified Google Sheet."""
+    if not rows_to_append:
+        print(f"No data to append to sheet '{sheet_name}'.")
+        return
+    
+    print(f"Attempting to write {len(rows_to_append)} rows to Google Sheet: {sheet_name}...")
+    try:
+        gc = get_gspread_client()
+        worksheet = gc.open(sheet_name).sheet1
+        
+        if clear_sheet:
+            worksheet.clear()
+            if header:
+                worksheet.append_row(header)
+        
+        worksheet.append_rows(rows_to_append)
+        print(f"Successfully wrote data to '{sheet_name}'.")
+    except gspread.exceptions.SpreadsheetNotFound:
+        print(f"ERROR: Spreadsheet '{sheet_name}' not found. Please check the name and sharing permissions.")
+    except gspread.exceptions.APIError as e:
+        print(f"ERROR: An API error occurred with Google Sheets: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred while writing to Google Sheets: {e}")
+
+
 # ---------------------------
 # Memory/Cache Functions
 # ---------------------------
@@ -248,19 +274,13 @@ def run_reddit_scan():
 def run_news_scan():
     """Fetches general market news and appends it to a Google Sheet."""
     print("--- Vulture News Scan triggered ---")
-    
-    # **FIX**: Wrapped API call and sheet writing in separate, more detailed try-except blocks.
     try:
         print("Fetching news from Finnhub...")
         news = finnhub_client.general_news('general', min_id=0)
         if not news or not isinstance(news, list):
             print("No news found or unexpected format from API."); return
         print(f"Fetched {len(news)} news articles.")
-    except Exception as e:
-        print(f"An error occurred fetching news from Finnhub: {e}")
-        return
-
-    try:
+        
         rows_to_append = []
         for article in news[:50]:
             dt = article.get('datetime')
@@ -270,15 +290,12 @@ def run_news_scan():
                 article.get('summary'), article.get('source'), article.get('url')
             ])
         
-        print(f"Preparing to append {len(rows_to_append)} rows to Google Sheets...")
-        gc = get_gspread_client()
-        sheet_name = os.getenv("GOOGLE_NEWS_SHEET_NAME")
-        worksheet = gc.open(sheet_name).sheet1
-        worksheet.append_rows(rows_to_append)
-        print(f"Successfully appended {len(rows_to_append)} news articles to '{sheet_name}'.")
+        append_to_sheet(os.getenv("GOOGLE_NEWS_SHEET_NAME"), rows_to_append)
 
+    except finnhub.FinnhubAPIException as e:
+        print(f"Finnhub API error during news scan: {e}")
     except Exception as e:
-        print(f"An error occurred processing news or writing to Google Sheets: {e}")
+        print(f"An unexpected error occurred during the news scan: {e}")
 
 
 # ---------------------------
@@ -287,8 +304,6 @@ def run_news_scan():
 def run_calendar_scan():
     """Fetches the economic calendar for the next 7 days and updates a Google Sheet."""
     print("--- Vulture Economic Calendar Scan triggered ---")
-    
-    # **FIX**: Wrapped API call and sheet writing in separate, more detailed try-except blocks.
     try:
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         one_week_from_now = (datetime.now(timezone.utc) + timedelta(days=7)).strftime('%Y-%m-%d')
@@ -305,11 +320,6 @@ def run_calendar_scan():
             print("No economic events found for the upcoming week."); return
         print(f"Fetched {len(events)} economic events for the next 7 days.")
 
-    except Exception as e:
-        print(f"An error occurred fetching the calendar from Finnhub: {e}")
-        return
-
-    try:
         rows_to_append = []
         for event in events:
             rows_to_append.append([
@@ -318,18 +328,13 @@ def run_calendar_scan():
                 event.get('prev')
             ])
             
-        print(f"Preparing to update Google Sheet with {len(rows_to_append)} events...")
-        gc = get_gspread_client()
-        sheet_name = os.getenv("GOOGLE_CALENDAR_SHEET_NAME")
-        worksheet = gc.open(sheet_name).sheet1
-        worksheet.clear()
         header = ["Time", "Country", "Event", "Impact", "Estimate", "Actual", "Previous"]
-        worksheet.append_row(header)
-        worksheet.append_rows(rows_to_append)
-        print(f"Successfully updated '{sheet_name}' with {len(rows_to_append)} events.")
+        append_to_sheet(os.getenv("GOOGLE_CALENDAR_SHEET_NAME"), rows_to_append, clear_sheet=True, header=header)
 
+    except finnhub.FinnhubAPIException as e:
+        print(f"Finnhub API error during calendar scan: {e}")
     except Exception as e:
-        print(f"An error occurred processing calendar data or writing to Google Sheets: {e}")
+        print(f"An unexpected error occurred during the calendar scan: {e}")
 
 
 # ---------------------------
