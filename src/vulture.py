@@ -139,7 +139,24 @@ def scrape_new_posts(subreddits, processed_ids):
 def get_ai_synthesis(post_data, comments_text):
     print(f"Sending post '{post_data['title']}' for AI synthesis...")
     system_prompt = """
-    You are an expert retail investor... Your primary goal is to synthesize the original post with the community's reaction...
+    You are an expert retail investor, skilled at replicating the intuitive process of a human analyst to find actionable trading ideas on Reddit.
+    Your primary goal is to synthesize the original post with the community's reaction in the comments to form a holistic view.
+
+    **Analysis Steps & Output Fields:**
+    You will be given the original post and a sample of its top comments. Based on BOTH, generate:
+    1.  `ticker`: The SINGLE stock ticker discussed. If multiple or none, return "N/A".
+    2.  `briefing`: A synthesis of the post and comments. What is the core thesis? How did the community react? Are there strong counterarguments or validations?
+    3.  `the_play`: The community-vetted actionable takeaway. What is the real play after considering the comments? If none, state "No clear play identified."
+    4.  `confidence_score`: A score from 0.0 to 10.0. This score MUST reflect the combined quality of the original thesis AND the community's reception. A great idea torn apart by comments should receive a LOW score.
+
+    **Core Rules for Scoring:**
+    - If `ticker` is "N/A", the `confidence_score` MUST be 0.0.
+    - **High Confidence (8.0-10.0):** A clear, well-reasoned thesis with strong, positive validation in the comments.
+    - **Medium Confidence (4.0-7.9):** A decent thesis with mixed or moderate community feedback.
+    - **Low Confidence (0.1-3.9):** A speculative idea, or a good idea that was heavily criticized in the comments.
+    - **Zero Confidence (0.0):** No actionable play, a question, or a post that was thoroughly debunked by the community.
+
+    Respond with ONLY a valid JSON object containing these fields.
     """
     user_prompt = f"**Original Post Title:** {post_data['title']}\n\n**Original Post Body:**\n{post_data['selftext']}\n\n**Top Comments:**\n{comments_text}"
     try:
@@ -243,32 +260,32 @@ def run_reddit_scan():
     print("--- Vulture Reddit Scan Complete ---")
 
 # ---------------------------
-# NEW: News Scan Logic
+# News Scan Logic
 # ---------------------------
 def run_news_scan():
     """Fetches general market news and appends it to a Google Sheet."""
     print("--- Vulture News Scan triggered ---")
     try:
-        # Fetch the latest 50 general news articles
         news = finnhub_client.general_news('general', min_id=0)
         if not news:
             print("No news found from API."); return
 
         print(f"Fetched {len(news)} news articles.")
         
-        # Prepare data for Google Sheets
         rows_to_append = []
-        for article in news[:50]: # Limit to 50 articles
+        for article in news[:50]:
+            # **FIX**: Added a check to ensure 'datetime' exists before converting.
+            dt = article.get('datetime')
+            iso_date = datetime.fromtimestamp(dt).isoformat() if dt else None
             rows_to_append.append([
                 article.get('id'),
-                datetime.fromtimestamp(article.get('datetime')).isoformat(),
+                iso_date,
                 article.get('headline'),
                 article.get('summary'),
                 article.get('source'),
                 article.get('url')
             ])
         
-        # Append to Google Sheet
         gc = get_gspread_client()
         sheet_name = os.getenv("GOOGLE_NEWS_SHEET_NAME")
         worksheet = gc.open(sheet_name).sheet1
@@ -279,7 +296,7 @@ def run_news_scan():
         print(f"An error occurred during the news scan: {e}")
 
 # ---------------------------
-# NEW: Economic Calendar Logic
+# Economic Calendar Logic
 # ---------------------------
 def run_calendar_scan():
     """Fetches the economic calendar for the next 7 days and updates a Google Sheet."""
@@ -288,15 +305,15 @@ def run_calendar_scan():
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         one_week_from_now = (datetime.now(timezone.utc) + timedelta(days=7)).strftime('%Y-%m-%d')
         
-        calendar = finnhub_client.economic_calendar(from_date=today, to_date=one_week_from_now)
-        events = calendar.get('economicCalendar', [])
+        # **FIX**: Corrected the method call to use the economic_calendar attribute
+        calendar_data = finnhub_client.economic_calendar(_from=today, to=one_week_from_now)
+        events = calendar_data.get('economicCalendar', [])
         
         if not events:
             print("No economic events found for the upcoming week."); return
 
         print(f"Fetched {len(events)} economic events for the next 7 days.")
         
-        # Prepare data for Google Sheets
         rows_to_append = []
         for event in events:
             rows_to_append.append([
@@ -309,12 +326,10 @@ def run_calendar_scan():
                 event.get('prev')
             ])
             
-        # Update Google Sheet (Clear and then write)
         gc = get_gspread_client()
         sheet_name = os.getenv("GOOGLE_CALENDAR_SHEET_NAME")
         worksheet = gc.open(sheet_name).sheet1
         worksheet.clear()
-        # Add a header row
         header = ["Time", "Country", "Event", "Impact", "Estimate", "Actual", "Previous"]
         worksheet.append_row(header)
         worksheet.append_rows(rows_to_append)
